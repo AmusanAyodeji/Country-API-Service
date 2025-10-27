@@ -59,7 +59,6 @@ def refresh_countries():
     
     last_refreshed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     for country in country_data:
-        conn, cur = init_connection()
         name = country.get("name")
         capital = country.get("capital")
         region = country.get("region")
@@ -67,63 +66,74 @@ def refresh_countries():
         flag = country.get("flag")
         currencies = country.get("currencies")
 
+        # --- Validation ---
         if not name:
-            raise HTTPException(400, detail={"error": "Validation failed","details": {"name": "is required"}})
-        if not population and population != 0:
-            raise HTTPException(400, detail={"error": "Validation failed","details": {"population": "is required"}})
+            raise HTTPException(400, detail={"error": "Validation failed", "details": {"name": "is required"}})
+        if population is None or population < 0:
+            raise HTTPException(400, detail={"error": "Validation failed", "details": {"population": "must be non-negative"}})
 
-        if not currencies:
-            currency_code = None
-            exchange_rate = None
-            estimated_gdp = 0
-            cur.execute("INSERT INTO countries (name, capital, region, population, currency_code, exchange_rate, estimated_gdp, flag_url, last_refreshed_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (name) DO UPDATE SET capital = EXCLUDED.capital, region = EXCLUDED.region, population = EXCLUDED.population, currency_code = EXCLUDED.currency_code, exchange_rate = EXCLUDED.exchange_rate, estimated_gdp = EXCLUDED.estimated_gdp, flag_url = EXCLUDED.flag_url, last_refreshed_at = EXCLUDED.last_refreshed_at;",
-                        (name, capital, region, population, currency_code, exchange_rate, estimated_gdp, flag, last_refreshed_at))
-            conn.commit()
-            cur.close()
-            conn.close()
-            continue
+        # --- Currency logic ---
+        currency_code = None
+        exchange_rate = None
+        estimated_gdp = None
 
-        currency_code = currencies[0].get("code")
-        exchange_rate = exchange_rate_data.get("rates").get(currency_code)
+        if currencies and len(currencies) > 0:
+            currency_code = currencies[0].get("code")
 
-        if exchange_rate is None:
-            exchange_rate = None
-            estimated_gdp = None
-            cur.execute("INSERT INTO countries (name, capital, region, population, currency_code, exchange_rate, estimated_gdp, flag_url, last_refreshed_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (name) DO UPDATE SET capital = EXCLUDED.capital, region = EXCLUDED.region, population = EXCLUDED.population, currency_code = EXCLUDED.currency_code, exchange_rate = EXCLUDED.exchange_rate, estimated_gdp = EXCLUDED.estimated_gdp, flag_url = EXCLUDED.flag_url, last_refreshed_at = EXCLUDED.last_refreshed_at;",
-                        (name, capital, region, population, currency_code, exchange_rate, estimated_gdp, flag, last_refreshed_at))
-            conn.commit()
-            cur.close()
-            conn.close()
-            continue
+            if currency_code:
+                exchange_rate = exchange_rate_data.get("rates", {}).get(currency_code)
+                if exchange_rate:
+                    estimated_gdp = (population * randint(1000, 2000)) / exchange_rate
 
-        estimated_gdp = (population * randint(1000,2000))/exchange_rate
+        # --- Insert or update ---
+        cur.execute("""
+            INSERT INTO countries 
+                (name, capital, region, population, currency_code, exchange_rate, estimated_gdp, flag_url, last_refreshed_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (name) DO UPDATE 
+                SET capital = EXCLUDED.capital,
+                    region = EXCLUDED.region,
+                    population = EXCLUDED.population,
+                    currency_code = EXCLUDED.currency_code,
+                    exchange_rate = EXCLUDED.exchange_rate,
+                    estimated_gdp = EXCLUDED.estimated_gdp,
+                    flag_url = EXCLUDED.flag_url,
+                    last_refreshed_at = EXCLUDED.last_refreshed_at;
+        """, (name, capital, region, population, currency_code, exchange_rate, estimated_gdp, flag, last_refreshed_at))
 
-        cur.execute("INSERT INTO countries (name, capital, region, population, currency_code, exchange_rate, estimated_gdp, flag_url, last_refreshed_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (name) DO UPDATE SET capital = EXCLUDED.capital, region = EXCLUDED.region, population = EXCLUDED.population, currency_code = EXCLUDED.currency_code, exchange_rate = EXCLUDED.exchange_rate, estimated_gdp = EXCLUDED.estimated_gdp, flag_url = EXCLUDED.flag_url, last_refreshed_at = EXCLUDED.last_refreshed_at;",
-                        (name, capital, region, population, currency_code, exchange_rate, estimated_gdp, flag, last_refreshed_at))
-        conn.commit()
-        cur.close()
-        conn.close()
+    # 3️⃣ Commit once after all inserts
+    conn.commit()
 
-    #generate image for summary and store well
-    conn,cur = init_connection()
+    # 4️⃣ Generate summary image
     cur.execute("SELECT COUNT(*) FROM countries;")
     total_countries = cur.fetchone()[0]
+
     img = Image.new('RGB', (800, 400), color='white')
     draw = ImageDraw.Draw(img)
     draw.text((50, 50), "Country Summary", fill='black')
     draw.text((50, 100), f"Total Number Of Countries: {total_countries}", fill='black')
-    cur.execute("SELECT name, estimated_gdp FROM countries WHERE estimated_gdp IS NOT NULL ORDER BY estimated_gdp DESC LIMIT 5;")
-    result = cur.fetchall()
-    count = 0
+
+    cur.execute("""
+        SELECT name, estimated_gdp 
+        FROM countries 
+        WHERE estimated_gdp IS NOT NULL 
+        ORDER BY estimated_gdp DESC LIMIT 5;
+    """)
+    top_gdp = cur.fetchall()
+
     draw.text((50, 140), "Top 5 countries by estimated GDP", fill='black')
-    for i in result:        
-        draw.text((50, 175 + count), f"{i[0]}: {i[1]}", fill='black')
-        count+=20
-    draw.text((50, 300), f"Last Refreshed At: {last_refreshed_at}", fill='black')
+    y_offset = 175
+    for name, gdp in top_gdp:
+        draw.text((50, y_offset), f"{name}: {round(gdp, 2)}", fill='black')
+        y_offset += 25
+
+    draw.text((50, 320), f"Last Refreshed At: {last_refreshed_at}", fill='black')
+
     if not os.path.exists("cache"):
         os.makedirs("cache")
-
     img.save("cache/summary.png")
+
+    # 5️⃣ Clean up
     cur.close()
     conn.close()
 
