@@ -1,0 +1,6 @@
+fastapi[standard]
+psycopg2-binary
+python-dotenv
+Pillow
+requests
+pyngrok
